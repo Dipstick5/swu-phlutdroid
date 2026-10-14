@@ -575,36 +575,145 @@ def search_docs(query: str, entity_ids: list[str] | None = None) -> dict[str, An
 
 
 # ---------------------------------------------------------------------------
-# Tool: tournaments (stub)
+# Tool: tournaments
 # ---------------------------------------------------------------------------
 @app.tool()
 def tournaments(
-    format: str = "premier",
-    period: str = "current",
-    tier: str | None = None,
+    limit: int = 20,
+    days_back: int = 90,
 ) -> dict[str, Any]:
-    """Paper tournament results (Melee/SWUBase). Not yet ingested."""
-    return {
-        "results": [],
-        "note": "Paper tournament data not yet ingested.",
-        "warning": "Never blend paper and online data.",
-    }
+    """
+    Recent Melee paper tournament results and standings.
+    Returns top finishers with leader/base archetype and record.
+    WARNING: paper data is distinct from online (Karabast) data — never compare WR directly.
+    """
+    conn = get_db()
+    try:
+        t_rows = conn.execute(
+            """
+            SELECT tournament_id, name, tournament_date, format, num_players, retrieved_at
+            FROM silver.tournament
+            ORDER BY tournament_date DESC
+            LIMIT ?
+            """,
+            [limit],
+        ).fetchall()
+
+        if not t_rows:
+            return {"results": [], "note": "No tournament data yet. Run update.py to ingest."}
+
+        t_cols = ["tournament_id", "name", "tournament_date", "format", "num_players", "retrieved_at"]
+        results = []
+        for t in t_rows:
+            t_dict = dict(zip(t_cols, t))
+            tid = t_dict["tournament_id"]
+            standing_rows = conn.execute(
+                """
+                SELECT ts.player_name, ts.standing, ts.leader_id, ts.base_id,
+                       ts.archetype_id, ts.wins, ts.losses,
+                       a.leader_name, a.base_name
+                FROM silver.tournament_standing ts
+                LEFT JOIN silver.archetype a USING (archetype_id)
+                WHERE ts.tournament_id = ?
+                ORDER BY ts.standing ASC
+                LIMIT 16
+                """,
+                [tid],
+            ).fetchall()
+            s_cols = ["player_name", "standing", "leader_id", "base_id",
+                      "archetype_id", "wins", "losses", "leader_name", "base_name"]
+            t_dict["top_standings"] = [dict(zip(s_cols, r)) for r in standing_rows]
+            results.append(t_dict)
+
+        return {
+            "warning": "Paper tournament data. Do not compare win rates to online (Karabast) data.",
+            "count": len(results),
+            "tournaments": results,
+        }
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
-# Tool: card_performance (stub)
+# Tool: card_performance
 # ---------------------------------------------------------------------------
 @app.tool()
 def card_performance(
-    card_id: str | None = None,
-    archetype_id: str | None = None,
+    archetype_id: str,
     period: str = "current",
+    min_play_rate: float = 0.05,
+    sort: str = "play_rate",
 ) -> dict[str, Any]:
-    """Per-card performance within an archetype. Requires per-card SWUStats data."""
-    return {
-        "results": [],
-        "note": "Per-card data pending confirmation of CardMetaStats.php availability.",
-    }
+    """
+    Per-card performance stats within a specific archetype.
+    archetype_id: use resolve() first, e.g. 'ASH_009/LAW_028'
+    sort: 'play_rate' | 'win_rate' | 'avg_copies'
+    min_play_rate: filter out cards played in fewer than this fraction of games (0–1)
+    """
+    start_week, end_week = _period_to_weeks(period)
+    conn = get_db()
+    try:
+        # Resolve archetype if given as text
+        arch_id = archetype_id
+        if "/" not in archetype_id:
+            results = _resolve_id_from_db(conn, archetype_id, "archetype")
+            if not results:
+                results = _resolve_id_from_db(conn, archetype_id)
+            if results:
+                arch_id = results[0]["id"]
+            else:
+                return {"error": f"Could not resolve archetype: {archetype_id}"}
+
+        order_map = {
+            "play_rate": "play_rate DESC",
+            "win_rate": "win_rate DESC",
+            "avg_copies": "avg_copies DESC",
+        }
+        order = order_map.get(sort, "play_rate DESC")
+
+        rows = conn.execute(
+            f"""
+            SELECT card_id, card_name, card_type, num_plays, num_wins,
+                   win_rate, play_rate, avg_copies, retrieved_at
+            FROM gold.card_stat_snapshot
+            WHERE archetype_id = ?
+              AND format = 'premier'
+              AND start_week >= ? AND end_week <= ?
+              AND play_rate >= ?
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY card_id, archetype_id, format, start_week, end_week
+                ORDER BY retrieved_at DESC
+            ) = 1
+            ORDER BY {order}
+            """,
+            [arch_id, start_week, end_week, min_play_rate],
+        ).fetchall()
+
+        if not rows:
+            return {
+                "archetype_id": arch_id,
+                "results": [],
+                "note": "No card data yet for this archetype/period. Run update.py to ingest.",
+            }
+
+        cols = ["card_id", "card_name", "card_type", "num_plays", "num_wins",
+                "win_rate", "play_rate", "avg_copies", "retrieved_at"]
+        cards = []
+        for r in rows:
+            row = dict(zip(cols, r))
+            for f in ("win_rate", "play_rate"):
+                if row[f] is not None:
+                    row[f] = round(row[f], 4)
+            cards.append(row)
+
+        return {
+            "source": SOURCE_INFO,
+            "archetype_id": arch_id,
+            "window": {"start_week": start_week, "end_week": end_week},
+            "cards": cards,
+        }
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

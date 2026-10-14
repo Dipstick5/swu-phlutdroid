@@ -91,6 +91,7 @@ FROM bronze.meta_raw m,
 
 -- ---------------------------------------------------------------------------
 -- 3. Matchup stat (expanded, typed)
+--    Bulk format: each payload item contains leaderID/baseID for both sides.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE TABLE silver.matchup_stat AS
 SELECT
@@ -99,9 +100,10 @@ SELECT
     r.end_week,
     r.format,
     r.retrieved_at,
-    r.leader_id                                       AS archetype_a_leader,
-    r.base_id                                         AS archetype_a_base,
-    r.leader_id || '/' || r.base_id                   AS archetype_a_id,
+    json_extract_string(j, '$.leaderID')              AS archetype_a_leader,
+    json_extract_string(j, '$.baseID')                AS archetype_a_base,
+    json_extract_string(j, '$.leaderID') || '/' ||
+        json_extract_string(j, '$.baseID')            AS archetype_a_id,
     json_extract_string(j, '$.opponentLeaderID')      AS archetype_b_leader,
     json_extract_string(j, '$.opponentBaseID')        AS archetype_b_base,
     json_extract_string(j, '$.opponentLeaderID') || '/' ||
@@ -164,3 +166,68 @@ INSERT INTO silver.alias VALUES
     ('Hemlock Tantiss',    'leader_aspect', 'HMW_003|cunning',    1.0),
     ('Tarfful blue',       'leader_aspect', 'HMW_010|vigilance',  1.0),
     ('Obi-Wan yellow',     'leader_aspect', 'LOF_008|cunning',    1.0);
+
+-- ---------------------------------------------------------------------------
+-- 5. Card stat (per-archetype card performance)
+--    Each row in bronze.card_stat_raw has payload: array of card objects.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE TABLE silver.card_stat AS
+SELECT
+    r.id                                                      AS raw_id,
+    r.leader_id,
+    r.base_id,
+    r.leader_id || '/' || r.base_id                           AS archetype_id,
+    r.start_week,
+    r.end_week,
+    r.format,
+    r.retrieved_at,
+    json_extract_string(j, '$.cardId')                        AS card_id,
+    json_extract_string(j, '$.cardTitle')                     AS card_name,
+    json_extract_string(j, '$.cardType')                      AS card_type,
+    TRY_CAST(json_extract_string(j, '$.numPlays')   AS INTEGER) AS num_plays,
+    TRY_CAST(json_extract_string(j, '$.numWins')    AS INTEGER) AS num_wins,
+    TRY_CAST(json_extract_string(j, '$.winRate')    AS DOUBLE)  AS win_rate,
+    TRY_CAST(json_extract_string(j, '$.playRate')   AS DOUBLE)  AS play_rate,
+    TRY_CAST(json_extract_string(j, '$.avgCopies')  AS DOUBLE)  AS avg_copies
+FROM bronze.card_stat_raw r,
+     LATERAL (SELECT unnest(json_extract(r.payload, '$[*]')) AS j)
+WHERE r.payload IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- 6. Tournament (Melee event list + per-event standings/decks)
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE TABLE silver.tournament AS
+SELECT
+    json_extract_string(j, '$.id')              AS tournament_id,
+    json_extract_string(j, '$.name')            AS name,
+    json_extract_string(j, '$.tournamentDate')  AS tournament_date,
+    json_extract_string(j, '$.format')          AS format,
+    TRY_CAST(json_extract_string(j, '$.numPlayers') AS INTEGER) AS num_players,
+    r.retrieved_at
+FROM bronze.tournament_raw r,
+     LATERAL (
+         SELECT unnest(
+             CASE WHEN json_type(json_extract(r.payload, '$.tournaments')) = 'ARRAY'
+                  THEN json_extract(r.payload, '$.tournaments[*]')
+                  ELSE json_extract(r.payload, '$[*]')
+             END
+         ) AS j
+     )
+QUALIFY ROW_NUMBER() OVER (PARTITION BY json_extract_string(j, '$.id')
+                            ORDER BY r.retrieved_at DESC) = 1;
+
+CREATE OR REPLACE TABLE silver.tournament_standing AS
+SELECT
+    r.tournament_id,
+    json_extract_string(j, '$.playerName')     AS player_name,
+    TRY_CAST(json_extract_string(j, '$.standing') AS INTEGER) AS standing,
+    json_extract_string(j, '$.leaderID')       AS leader_id,
+    json_extract_string(j, '$.baseID')         AS base_id,
+    json_extract_string(j, '$.leaderID') || '/' ||
+        json_extract_string(j, '$.baseID')     AS archetype_id,
+    TRY_CAST(json_extract_string(j, '$.wins')  AS INTEGER) AS wins,
+    TRY_CAST(json_extract_string(j, '$.losses') AS INTEGER) AS losses,
+    r.retrieved_at
+FROM bronze.tournament_deck_raw r,
+     LATERAL (SELECT unnest(json_extract(r.payload, '$[*]')) AS j)
+WHERE json_extract_string(j, '$.leaderID') IS NOT NULL;

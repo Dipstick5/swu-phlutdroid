@@ -127,7 +127,53 @@ FROM silver.matchup_stat m
 WHERE m.num_plays IS NOT NULL;
 
 -- ---------------------------------------------------------------------------
--- 3. meta_by_aspect: aggregate meta stats by (leader_id, base_aspect)
+-- 3. card_stat_snapshot: latest per-card stats for each archetype/week
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS gold.card_stat_snapshot (
+    snapshot_id    INTEGER PRIMARY KEY,
+    archetype_id   VARCHAR NOT NULL,
+    leader_id      VARCHAR NOT NULL,
+    base_id        VARCHAR NOT NULL,
+    card_id        VARCHAR NOT NULL,
+    card_name      VARCHAR,
+    card_type      VARCHAR,
+    format         VARCHAR NOT NULL,
+    start_week     INTEGER NOT NULL,
+    end_week       INTEGER NOT NULL,
+    num_plays      INTEGER,
+    num_wins       INTEGER,
+    win_rate       DOUBLE,
+    play_rate      DOUBLE,
+    avg_copies     DOUBLE,
+    retrieved_at   TIMESTAMPTZ NOT NULL,
+    UNIQUE (archetype_id, card_id, format, start_week, end_week, retrieved_at)
+);
+
+CREATE SEQUENCE IF NOT EXISTS gold.card_stat_snapshot_seq START 1;
+
+INSERT OR IGNORE INTO gold.card_stat_snapshot
+SELECT
+    nextval('gold.card_stat_snapshot_seq'),
+    s.archetype_id,
+    s.leader_id,
+    s.base_id,
+    s.card_id,
+    s.card_name,
+    s.card_type,
+    s.format,
+    s.start_week,
+    s.end_week,
+    s.num_plays,
+    s.num_wins,
+    s.win_rate / 100.0,
+    s.play_rate / 100.0,
+    s.avg_copies,
+    s.retrieved_at
+FROM silver.card_stat s
+WHERE s.card_id IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- 4. meta_by_aspect: aggregate meta stats by (leader_id, base_aspect)
 --    Pools all specific-base variants of a leader into one aspect group.
 --    Deduplicates to the latest retrieved_at per archetype before aggregating.
 --    Wilson CI is recomputed from the pooled counts.

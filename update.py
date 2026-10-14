@@ -15,7 +15,10 @@ from pathlib import Path
 
 import duckdb
 
-from ingest.bronze_ingest import init_schema, ingest_meta, ingest_matchups
+from ingest.bronze_ingest import (
+    init_schema, ingest_meta, ingest_matchups_bulk,
+    ingest_card_stats, ingest_melee_tournaments,
+)
 
 EPOCH = date(2025, 9, 20)
 REPO_ROOT = Path(__file__).parent
@@ -62,8 +65,10 @@ def main() -> None:
     print("[ 1/3 ] Bronze ingest...")
     init_schema(conn)
     archetypes = ingest_meta(conn, start_week, end_week, args.fmt)
-    ingest_matchups(conn, archetypes, start_week, end_week, args.fmt,
-                    min_plays=args.min_plays)
+    ingest_matchups_bulk(conn, start_week, end_week, args.fmt)
+    ingest_card_stats(conn, archetypes, start_week, end_week, args.fmt,
+                      min_plays=args.min_plays)
+    ingest_melee_tournaments(conn)
     conn.commit()
 
     # ── Silver ────────────────────────────────────────────────────────────────
