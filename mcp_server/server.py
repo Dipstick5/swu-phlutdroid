@@ -238,6 +238,10 @@ def meta(
                 WHERE format = ? AND start_week >= ? AND end_week <= ?
                   AND num_plays >= ?
                   AND source = 'swustats_online'
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY leader_id, base_aspect, format, start_week, end_week
+                    ORDER BY retrieved_at DESC
+                ) = 1
                 ORDER BY {order}
                 """,
                 [format, start_week, end_week, min_n],
@@ -289,6 +293,10 @@ def meta(
             WHERE g.format = ? AND g.start_week >= ? AND g.end_week <= ?
               AND g.num_plays >= ?
               AND g.source = 'swustats_online'
+            QUALIFY ROW_NUMBER() OVER (
+                PARTITION BY g.archetype_id, g.format, g.start_week, g.end_week
+                ORDER BY g.retrieved_at DESC
+            ) = 1
             ORDER BY {order}
             """,
             [format, start_week, end_week, min_n],
@@ -392,6 +400,10 @@ def matchup(
                   AND g.start_week >= ? AND g.end_week <= ?
                   AND g.num_plays >= ?
                   AND g.source = 'swustats_online'
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY g.archetype_a_id, g.archetype_b_id, g.format, g.start_week, g.end_week
+                    ORDER BY g.retrieved_at DESC
+                ) = 1
                 ORDER BY g.num_plays DESC
             """
             params = [a_pat, b_pat, start_week, end_week, min_n]
@@ -410,6 +422,10 @@ def matchup(
                   AND g.start_week >= ? AND g.end_week <= ?
                   AND g.num_plays >= ?
                   AND g.source = 'swustats_online'
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY g.archetype_a_id, g.archetype_b_id, g.format, g.start_week, g.end_week
+                    ORDER BY g.retrieved_at DESC
+                ) = 1
                 ORDER BY g.win_rate ASC
             """
             params = [a_pat, start_week, end_week, min_n]
@@ -450,6 +466,10 @@ def matchup(
                   AND g.start_week >= ? AND g.end_week <= ?
                   AND g.num_plays >= ?
                   AND g.source = 'swustats_online'
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY g.archetype_a_id, g.archetype_b_id, g.format, g.start_week, g.end_week
+                    ORDER BY g.retrieved_at DESC
+                ) = 1
                 ORDER BY g.num_plays DESC
                 """,
                 [b_pat, a_pat, start_week, end_week, min_n],

@@ -129,9 +129,18 @@ WHERE m.num_plays IS NOT NULL;
 -- ---------------------------------------------------------------------------
 -- 3. meta_by_aspect: aggregate meta stats by (leader_id, base_aspect)
 --    Pools all specific-base variants of a leader into one aspect group.
+--    Deduplicates to the latest retrieved_at per archetype before aggregating.
 --    Wilson CI is recomputed from the pooled counts.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE VIEW gold.meta_by_aspect AS
+WITH deduped AS (
+    SELECT *
+    FROM gold.meta_snapshot
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY archetype_id, format, start_week, end_week, source
+        ORDER BY retrieved_at DESC
+    ) = 1
+)
 SELECT
     g.leader_id,
     a.leader_name,
@@ -141,7 +150,6 @@ SELECT
     g.start_week,
     g.end_week,
     g.source,
-    -- Use most recent snapshot for this (leader, aspect, format, period)
     MAX(g.retrieved_at)                               AS retrieved_at,
     SUM(g.num_plays)                                  AS num_plays,
     -- Weighted average win rate (weighted by plays)
@@ -164,7 +172,7 @@ SELECT
         / (1 + 1.96*1.96 / SUM(g.num_plays))
     END                                               AS wr_ci_high,
     COUNT(DISTINCT g.archetype_id)                    AS base_variant_count
-FROM gold.meta_snapshot g
+FROM deduped g
 JOIN silver.archetype a USING (archetype_id)
 GROUP BY
     g.leader_id, a.leader_name, a.leader_subtitle, a.base_aspect,
@@ -173,8 +181,17 @@ GROUP BY
 -- ---------------------------------------------------------------------------
 -- 4. matchup_by_aspect: aggregate matchup stats by
 --    (leader_a + aspect_a) vs (leader_b + aspect_b)
+--    Deduplicates to the latest retrieved_at per matchup pair before aggregating.
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE VIEW gold.matchup_by_aspect AS
+WITH deduped AS (
+    SELECT *
+    FROM gold.matchup_snapshot
+    QUALIFY ROW_NUMBER() OVER (
+        PARTITION BY archetype_a_id, archetype_b_id, format, start_week, end_week, source
+        ORDER BY retrieved_at DESC
+    ) = 1
+)
 SELECT
     aa.leader_id                                      AS leader_a_id,
     aa.leader_name                                    AS leader_a_name,
@@ -212,7 +229,7 @@ SELECT
     SUM(g.plays_going_first)                          AS plays_going_first,
     SUM(g.wins_going_first)                           AS wins_going_first,
     SUM(g.wins_going_second)                          AS wins_going_second
-FROM gold.matchup_snapshot g
+FROM deduped g
 JOIN silver.archetype aa ON aa.archetype_id = g.archetype_a_id
 JOIN silver.archetype ab ON ab.archetype_id = g.archetype_b_id
 GROUP BY
