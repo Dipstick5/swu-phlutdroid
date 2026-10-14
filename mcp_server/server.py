@@ -37,6 +37,80 @@ def get_db() -> duckdb.DuckDBPyConnection:
     return duckdb.connect(db_path, read_only=True)
 
 
+def _matchup_by_aspect(
+    conn: duckdb.DuckDBPyConnection,
+    a_id: str,
+    b_id: str | None,
+    start_week: int,
+    end_week: int,
+    min_n: int,
+    a_text: str,
+    b_text: str | None,
+) -> dict[str, Any]:
+    """Query gold.matchup_by_aspect for leader+aspect group matchups."""
+    if b_id:
+        rows = conn.execute(
+            """
+            SELECT group_a_id, leader_a_id, leader_a_name, aspect_a,
+                   group_b_id, leader_b_id, leader_b_name, aspect_b,
+                   num_wins, num_plays, win_rate, wr_ci_low, wr_ci_high,
+                   plays_going_first, wins_going_first, wins_going_second,
+                   retrieved_at
+            FROM gold.matchup_by_aspect
+            WHERE group_a_id = ?
+              AND group_b_id = ?
+              AND format = 'premier'
+              AND start_week >= ? AND end_week <= ?
+              AND num_plays >= ?
+              AND source = 'swustats_online'
+            ORDER BY num_plays DESC
+            """,
+            [a_id, b_id, start_week, end_week, min_n],
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            """
+            SELECT group_a_id, leader_a_id, leader_a_name, aspect_a,
+                   group_b_id, leader_b_id, leader_b_name, aspect_b,
+                   num_wins, num_plays, win_rate, wr_ci_low, wr_ci_high,
+                   plays_going_first, wins_going_first, wins_going_second,
+                   retrieved_at
+            FROM gold.matchup_by_aspect
+            WHERE group_a_id = ?
+              AND format = 'premier'
+              AND start_week >= ? AND end_week <= ?
+              AND num_plays >= ?
+              AND source = 'swustats_online'
+            ORDER BY win_rate ASC
+            """,
+            [a_id, start_week, end_week, min_n],
+        ).fetchall()
+
+    cols = [
+        "group_a_id", "leader_a_id", "leader_a_name", "aspect_a",
+        "group_b_id", "leader_b_id", "leader_b_name", "aspect_b",
+        "num_wins", "num_plays", "win_rate", "wr_ci_low", "wr_ci_high",
+        "plays_going_first", "wins_going_first", "wins_going_second",
+        "retrieved_at",
+    ]
+    matchups_out = []
+    for r in rows:
+        row = dict(zip(cols, r))
+        for field in ("win_rate", "wr_ci_low", "wr_ci_high"):
+            if row[field] is not None:
+                row[field] = round(row[field], 4)
+        matchups_out.append(row)
+
+    return {
+        "source": SOURCE_INFO,
+        "window": {"start_week": start_week, "end_week": end_week},
+        "group_by": "leader_aspect",
+        "archetype_a": a_text,
+        "archetype_b": b_text,
+        "matchups": matchups_out,
+    }
+
+
 def current_week() -> int:
     """Week number relative to epoch Sep 20 2025."""
     epoch = date(2025, 9, 20)
@@ -130,16 +204,69 @@ def meta(
     period: str = "current",
     min_n: int = 50,
     sort: str = "plays",
+    group_by_aspect: bool = False,
 ) -> dict[str, Any]:
     """
     Return archetype-level meta stats.
     period: 'current' | 'week:<N>' | 'range:<start>-<end>' | integer week number
     sort: 'plays' | 'wr'
+    group_by_aspect: if True, aggregate by (leader + base_aspect) instead of specific archetype.
+      'Ahsoka yellow' pools all Ahsoka/cunning-base variants together for wider sample sizes.
     Always includes source info and bias note.
     """
     start_week, end_week = _period_to_weeks(period)
     conn = get_db()
     try:
+        if group_by_aspect:
+            total_plays = conn.execute(
+                """
+                SELECT COALESCE(SUM(num_plays), 0)
+                FROM gold.meta_by_aspect
+                WHERE format = ? AND start_week >= ? AND end_week <= ?
+                  AND source = 'swustats_online'
+                """,
+                [format, start_week, end_week],
+            ).fetchone()[0]
+
+            order = "num_plays DESC" if sort == "plays" else "win_rate DESC"
+            rows = conn.execute(
+                f"""
+                SELECT leader_id, leader_name, leader_subtitle, base_aspect,
+                       num_plays, win_rate, wr_ci_low, wr_ci_high,
+                       base_variant_count, retrieved_at
+                FROM gold.meta_by_aspect
+                WHERE format = ? AND start_week >= ? AND end_week <= ?
+                  AND num_plays >= ?
+                  AND source = 'swustats_online'
+                ORDER BY {order}
+                """,
+                [format, start_week, end_week, min_n],
+            ).fetchall()
+
+            cols = [
+                "leader_id", "leader_name", "leader_subtitle", "base_aspect",
+                "num_plays", "win_rate", "wr_ci_low", "wr_ci_high",
+                "base_variant_count", "retrieved_at",
+            ]
+            groups = []
+            for r in rows:
+                row = dict(zip(cols, r))
+                row["group_id"] = f"{row['leader_id']}|{row['base_aspect']}"
+                row["share"] = round(row["num_plays"] / total_plays, 4) if total_plays else None
+                for field in ("win_rate", "wr_ci_low", "wr_ci_high"):
+                    if row[field] is not None:
+                        row[field] = round(row[field], 4)
+                groups.append(row)
+
+            return {
+                "source": SOURCE_INFO,
+                "window": {"start_week": start_week, "end_week": end_week},
+                "format": format,
+                "group_by": "leader_aspect",
+                "n": int(total_plays),
+                "groups": groups,
+            }
+
         total_plays = conn.execute(
             """
             SELECT COALESCE(SUM(num_plays), 0)
@@ -156,7 +283,7 @@ def meta(
             SELECT g.archetype_id, g.leader_id, g.base_id,
                    g.num_plays, g.win_rate, g.wr_ci_low, g.wr_ci_high,
                    g.avg_turns_win, g.retrieved_at,
-                   a.leader_name, a.leader_subtitle, a.base_name
+                   a.leader_name, a.leader_subtitle, a.base_name, a.base_aspect
             FROM gold.meta_snapshot g
             LEFT JOIN silver.archetype a USING (archetype_id)
             WHERE g.format = ? AND g.start_week >= ? AND g.end_week <= ?
@@ -171,7 +298,7 @@ def meta(
             "archetype_id", "leader_id", "base_id",
             "num_plays", "win_rate", "wr_ci_low", "wr_ci_high",
             "avg_turns_win", "retrieved_at",
-            "leader_name", "leader_subtitle", "base_name",
+            "leader_name", "leader_subtitle", "base_name", "base_aspect",
         ]
         archetypes = []
         for r in rows:
@@ -202,33 +329,53 @@ def matchup(
     archetype_b: str | None = None,
     period: str = "current",
     min_n: int = 8,
+    group_by_aspect: bool = False,
 ) -> dict[str, Any]:
     """
     Return matchup data for archetype_a (optionally vs archetype_b).
     With no B, returns A's full spread sorted by win rate ascending (worst first).
-    archetype_a / archetype_b can be archetype_id or alias text.
+    archetype_a / archetype_b can be archetype_id, alias text, or aspect alias
+      (e.g. 'Ahsoka yellow', 'Krennic blue').
+    group_by_aspect: if True, aggregate matchups by leader+aspect groups instead of
+      specific archetypes. Automatically set when an aspect alias is resolved.
     """
     start_week, end_week = _period_to_weeks(period)
     conn = get_db()
     try:
-        def _resolve(text: str, prefer_kind: str = "archetype") -> str | None:
+        def _resolve(text: str, prefer_kind: str = "archetype") -> tuple[str | None, bool]:
+            """Returns (id_or_pattern, is_aspect_group)."""
+            # Direct archetype id
             if "/" in text and len(text.split("/")) == 2:
-                return text
+                return text, False
+            # Direct aspect group id (leader|aspect)
+            if "|" in text and len(text.split("|")) == 2:
+                return text, True
+            # Alias lookup
+            results = _resolve_id_from_db(conn, text, "leader_aspect")
+            if results:
+                return results[0]["id"], True
             results = _resolve_id_from_db(conn, text, prefer_kind)
             if results:
-                return results[0]["id"]
+                return results[0]["id"], False
             results = _resolve_id_from_db(conn, text, "leader")
             if results:
-                return results[0]["id"] + "/%"
-            return None
+                return results[0]["id"] + "/%", False
+            return None, False
 
-        a_pat = _resolve(archetype_a)
-        if not a_pat:
+        a_id, a_is_aspect = _resolve(archetype_a)
+        if not a_id:
             return {"error": f"Could not resolve: {archetype_a}"}
 
-        b_pat = _resolve(archetype_b) if archetype_b else None
+        b_id, b_is_aspect = _resolve(archetype_b) if archetype_b else (None, False)
 
-        base_params = [a_pat, "premier", start_week, end_week, min_n]
+        use_aspect = group_by_aspect or a_is_aspect or b_is_aspect
+
+        if use_aspect:
+            return _matchup_by_aspect(conn, a_id, b_id, start_week, end_week, min_n, archetype_a, archetype_b)
+
+        a_pat = a_id
+        b_pat = b_id
+
         if b_pat:
             q = """
                 SELECT g.archetype_a_id, g.archetype_b_id,
@@ -241,13 +388,13 @@ def matchup(
                 LEFT JOIN silver.archetype a ON a.archetype_id = g.archetype_b_id
                 WHERE g.archetype_a_id LIKE ?
                   AND g.archetype_b_id LIKE ?
-                  AND g.format = ?
+                  AND g.format = 'premier'
                   AND g.start_week >= ? AND g.end_week <= ?
                   AND g.num_plays >= ?
                   AND g.source = 'swustats_online'
                 ORDER BY g.num_plays DESC
             """
-            params = [a_pat, b_pat, "premier", start_week, end_week, min_n]
+            params = [a_pat, b_pat, start_week, end_week, min_n]
         else:
             q = """
                 SELECT g.archetype_a_id, g.archetype_b_id,
@@ -259,13 +406,13 @@ def matchup(
                 FROM gold.matchup_snapshot g
                 LEFT JOIN silver.archetype a ON a.archetype_id = g.archetype_b_id
                 WHERE g.archetype_a_id LIKE ?
-                  AND g.format = ?
+                  AND g.format = 'premier'
                   AND g.start_week >= ? AND g.end_week <= ?
                   AND g.num_plays >= ?
                   AND g.source = 'swustats_online'
                 ORDER BY g.win_rate ASC
             """
-            params = base_params
+            params = [a_pat, start_week, end_week, min_n]
 
         rows = conn.execute(q, params).fetchall()
         cols = [

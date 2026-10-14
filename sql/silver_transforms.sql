@@ -9,6 +9,36 @@ CREATE SCHEMA IF NOT EXISTS silver;
 --    Derived from meta_raw payload because the matchup API returns only IDs
 --    for opponents - we need the name lookup from meta.
 -- ---------------------------------------------------------------------------
+-- Base aspect lookup: base_id -> aspect color (Heroism/Villainy not yet on bases)
+CREATE OR REPLACE TABLE silver.base_aspect (
+    base_id     VARCHAR PRIMARY KEY,
+    aspect      VARCHAR  -- heroism|villainy|command|aggression|cunning|vigilance|colorless
+);
+
+INSERT INTO silver.base_aspect VALUES
+    ('IBH_054', 'vigilance'),
+    ('JTL_020', 'vigilance'),
+    ('JTL_021', 'vigilance'),
+    ('JTL_024', 'command'),
+    ('JTL_025', 'aggression'),
+    ('JTL_028', 'cunning'),
+    ('JTL_031', 'colorless'),
+    ('LAW_019', 'vigilance'),
+    ('LAW_020', 'vigilance'),
+    ('LAW_022', 'command'),
+    ('LAW_025', 'aggression'),
+    ('LAW_028', 'cunning'),
+    ('LAW_029', 'cunning'),
+    ('LOF_019', 'vigilance'),
+    ('LOF_020', 'vigilance'),
+    ('LOF_023', 'command'),
+    ('LOF_026', 'aggression'),
+    ('LOF_029', 'cunning'),
+    ('SEC_021', 'command'),
+    ('SEC_024', 'aggression'),
+    ('SEC_026', 'cunning')
+ON CONFLICT (base_id) DO UPDATE SET aspect = excluded.aspect;
+
 CREATE OR REPLACE TABLE silver.archetype AS
 SELECT DISTINCT
     r.leaderID                                AS leader_id,
@@ -17,7 +47,8 @@ SELECT DISTINCT
     r.baseID                                  AS base_id,
     r.baseTitle                               AS base_name,
     r.baseSubtitle                            AS base_subtitle,
-    r.leaderID || '/' || r.baseID             AS archetype_id
+    r.leaderID || '/' || r.baseID             AS archetype_id,
+    COALESCE(ba.aspect, 'unknown')            AS base_aspect
 FROM (
     SELECT
         json_extract_string(j, '$.leaderID')        AS leaderID,
@@ -30,7 +61,8 @@ FROM (
         SELECT unnest(json_extract(payload, '$[*]')) AS j
         FROM bronze.meta_raw
     )
-) r;
+) r
+LEFT JOIN silver.base_aspect ba ON ba.base_id = r.baseID;
 
 -- ---------------------------------------------------------------------------
 -- 2. Meta stat (expanded, typed)
@@ -95,10 +127,12 @@ CREATE OR REPLACE TABLE silver.alias (
 );
 
 INSERT INTO silver.alias VALUES
+    -- Specific archetype aliases
     ('Krennic SGC',        'archetype', 'LAW_008/JTL_020', 1.0),
     ('Krennic Shield',     'archetype', 'LAW_008/JTL_020', 1.0),
     ('Ahsoka Canto',       'archetype', 'ASH_009/LAW_028', 1.0),
     ('Canto Ahsoka',       'archetype', 'ASH_009/LAW_028', 1.0),
+    -- Leader aliases
     ('Director Krennic',   'leader',    'LAW_008',          1.0),
     ('Krennic',            'leader',    'LAW_008',          0.9),
     ('Ahsoka',             'leader',    'ASH_009',          0.9),
@@ -111,6 +145,7 @@ INSERT INTO silver.alias VALUES
     ('Vader',              'leader',    'JTL_006',          0.9),
     ('Obi-Wan Kenobi',     'leader',    'LOF_008',          1.0),
     ('Obi-Wan',            'leader',    'LOF_008',          0.9),
+    -- Base aliases
     ('Shield Generator Complex', 'base', 'JTL_020',         1.0),
     ('SGC',                'base',      'JTL_020',          1.0),
     ('Mount Tantiss',      'base',      'SEC_026',          1.0),
@@ -118,4 +153,14 @@ INSERT INTO silver.alias VALUES
     ('Republic City',      'base',      'SEC_021',          1.0),
     ('Canto Bight',        'base',      'LAW_028',          1.0),
     ('Daimyo''s Palace',   'base',      'LAW_020',          1.0),
-    ('Crystal Caves',      'base',      'LOF_029',          1.0);
+    ('Crystal Caves',      'base',      'LOF_029',          1.0),
+    -- Aspect-group aliases: leader_id|aspect pseudo-id for aspect-level queries
+    ('Krennic blue',       'leader_aspect', 'LAW_008|vigilance',  1.0),
+    ('Krennic vigilance',  'leader_aspect', 'LAW_008|vigilance',  1.0),
+    ('Ahsoka yellow',      'leader_aspect', 'ASH_009|cunning',    1.0),
+    ('Ahsoka cunning',     'leader_aspect', 'ASH_009|cunning',    1.0),
+    ('Wicket blue',        'leader_aspect', 'HMW_014|vigilance',  1.0),
+    ('Hemlock yellow',     'leader_aspect', 'HMW_003|cunning',    1.0),
+    ('Hemlock Tantiss',    'leader_aspect', 'HMW_003|cunning',    1.0),
+    ('Tarfful blue',       'leader_aspect', 'HMW_010|vigilance',  1.0),
+    ('Obi-Wan yellow',     'leader_aspect', 'LOF_008|cunning',    1.0);

@@ -125,3 +125,97 @@ SELECT
     m.retrieved_at
 FROM silver.matchup_stat m
 WHERE m.num_plays IS NOT NULL;
+
+-- ---------------------------------------------------------------------------
+-- 3. meta_by_aspect: aggregate meta stats by (leader_id, base_aspect)
+--    Pools all specific-base variants of a leader into one aspect group.
+--    Wilson CI is recomputed from the pooled counts.
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW gold.meta_by_aspect AS
+SELECT
+    g.leader_id,
+    a.leader_name,
+    a.leader_subtitle,
+    a.base_aspect,
+    g.format,
+    g.start_week,
+    g.end_week,
+    g.source,
+    -- Use most recent snapshot for this (leader, aspect, format, period)
+    MAX(g.retrieved_at)                               AS retrieved_at,
+    SUM(g.num_plays)                                  AS num_plays,
+    -- Weighted average win rate (weighted by plays)
+    SUM(g.win_rate * g.num_plays) / NULLIF(SUM(g.num_plays), 0) AS win_rate,
+    -- Wilson CI from pooled counts
+    CASE WHEN SUM(g.num_plays) > 0 THEN
+        (SUM(g.win_rate * g.num_plays) / SUM(g.num_plays)
+         + 1.96*1.96 / (2 * SUM(g.num_plays))
+         - 1.96 * SQRT((SUM(g.win_rate * g.num_plays) / SUM(g.num_plays)
+                        * (1 - SUM(g.win_rate * g.num_plays) / SUM(g.num_plays))
+                        + 1.96*1.96 / (4 * SUM(g.num_plays))) / SUM(g.num_plays)))
+        / (1 + 1.96*1.96 / SUM(g.num_plays))
+    END                                               AS wr_ci_low,
+    CASE WHEN SUM(g.num_plays) > 0 THEN
+        (SUM(g.win_rate * g.num_plays) / SUM(g.num_plays)
+         + 1.96*1.96 / (2 * SUM(g.num_plays))
+         + 1.96 * SQRT((SUM(g.win_rate * g.num_plays) / SUM(g.num_plays)
+                        * (1 - SUM(g.win_rate * g.num_plays) / SUM(g.num_plays))
+                        + 1.96*1.96 / (4 * SUM(g.num_plays))) / SUM(g.num_plays)))
+        / (1 + 1.96*1.96 / SUM(g.num_plays))
+    END                                               AS wr_ci_high,
+    COUNT(DISTINCT g.archetype_id)                    AS base_variant_count
+FROM gold.meta_snapshot g
+JOIN silver.archetype a USING (archetype_id)
+GROUP BY
+    g.leader_id, a.leader_name, a.leader_subtitle, a.base_aspect,
+    g.format, g.start_week, g.end_week, g.source;
+
+-- ---------------------------------------------------------------------------
+-- 4. matchup_by_aspect: aggregate matchup stats by
+--    (leader_a + aspect_a) vs (leader_b + aspect_b)
+-- ---------------------------------------------------------------------------
+CREATE OR REPLACE VIEW gold.matchup_by_aspect AS
+SELECT
+    aa.leader_id                                      AS leader_a_id,
+    aa.leader_name                                    AS leader_a_name,
+    aa.base_aspect                                    AS aspect_a,
+    ab.leader_id                                      AS leader_b_id,
+    ab.leader_name                                    AS leader_b_name,
+    ab.base_aspect                                    AS aspect_b,
+    aa.leader_id || '|' || aa.base_aspect             AS group_a_id,
+    ab.leader_id || '|' || ab.base_aspect             AS group_b_id,
+    g.format,
+    g.start_week,
+    g.end_week,
+    g.source,
+    MAX(g.retrieved_at)                               AS retrieved_at,
+    SUM(g.num_wins)                                   AS num_wins,
+    SUM(g.num_plays)                                  AS num_plays,
+    SUM(g.num_wins)::DOUBLE / NULLIF(SUM(g.num_plays), 0) AS win_rate,
+    -- Wilson CI from pooled counts
+    CASE WHEN SUM(g.num_plays) > 0 THEN
+        (SUM(g.num_wins)::DOUBLE / SUM(g.num_plays)
+         + 1.96*1.96 / (2 * SUM(g.num_plays))
+         - 1.96 * SQRT((SUM(g.num_wins)::DOUBLE / SUM(g.num_plays)
+                        * (1 - SUM(g.num_wins)::DOUBLE / SUM(g.num_plays))
+                        + 1.96*1.96 / (4 * SUM(g.num_plays))) / SUM(g.num_plays)))
+        / (1 + 1.96*1.96 / SUM(g.num_plays))
+    END                                               AS wr_ci_low,
+    CASE WHEN SUM(g.num_plays) > 0 THEN
+        (SUM(g.num_wins)::DOUBLE / SUM(g.num_plays)
+         + 1.96*1.96 / (2 * SUM(g.num_plays))
+         + 1.96 * SQRT((SUM(g.num_wins)::DOUBLE / SUM(g.num_plays)
+                        * (1 - SUM(g.num_wins)::DOUBLE / SUM(g.num_plays))
+                        + 1.96*1.96 / (4 * SUM(g.num_plays))) / SUM(g.num_plays)))
+        / (1 + 1.96*1.96 / SUM(g.num_plays))
+    END                                               AS wr_ci_high,
+    SUM(g.plays_going_first)                          AS plays_going_first,
+    SUM(g.wins_going_first)                           AS wins_going_first,
+    SUM(g.wins_going_second)                          AS wins_going_second
+FROM gold.matchup_snapshot g
+JOIN silver.archetype aa ON aa.archetype_id = g.archetype_a_id
+JOIN silver.archetype ab ON ab.archetype_id = g.archetype_b_id
+GROUP BY
+    aa.leader_id, aa.leader_name, aa.base_aspect,
+    ab.leader_id, ab.leader_name, ab.base_aspect,
+    g.format, g.start_week, g.end_week, g.source;
