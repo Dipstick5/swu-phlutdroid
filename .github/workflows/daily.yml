@@ -1,0 +1,98 @@
+name: Daily SWU Meta Ingest
+
+on:
+  schedule:
+    # Runs every day at 06:00 UTC
+    - cron: "0 6 * * *"
+  workflow_dispatch:
+    inputs:
+      week:
+        description: "Week number (leave blank for auto-calculate)"
+        required: false
+        default: ""
+      format:
+        description: "Format"
+        required: false
+        default: "premier"
+      min_plays:
+        description: "Min plays threshold for matchup fetch"
+        required: false
+        default: "20"
+
+jobs:
+  ingest:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download latest DB artifact (if exists)
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          name: swu-duckdb
+          path: data/
+          workflow: daily.yml
+          if_no_artifact_found: ignore
+        continue-on-error: true
+
+      - name: Run bronze ingest
+        env:
+          SWU_WEEK: ${{ github.event.inputs.week }}
+          SWU_FORMAT: ${{ github.event.inputs.format || 'premier' }}
+          SWU_MIN_PLAYS: ${{ github.event.inputs.min_plays || '20' }}
+        run: |
+          WEEK_ARG=""
+          if [ -n "$SWU_WEEK" ]; then
+            WEEK_ARG="--week $SWU_WEEK"
+          fi
+          python -m ingest.bronze_ingest \
+            $WEEK_ARG \
+            --format "$SWU_FORMAT" \
+            --min-plays "$SWU_MIN_PLAYS" \
+            --db data/swu.duckdb
+
+      - name: Run silver/gold transforms
+        run: |
+          python -c "
+          import duckdb, pathlib, re
+          def run_sql(conn, path):
+              sql = re.sub(r'--[^\n]*', '', pathlib.Path(path).read_text())
+              [conn.execute(s.strip()) for s in sql.split(';') if s.strip()]
+          conn = duckdb.connect('data/swu.duckdb')
+          run_sql(conn, 'sql/silver_transforms.sql')
+          run_sql(conn, 'sql/gold_transforms.sql')
+          conn.commit()
+          conn.close()
+          print('Transforms complete.')
+          "
+
+      - name: Upload DB artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: swu-duckdb
+          path: data/swu.duckdb
+          retention-days: 90
+          overwrite: true
+
+      - name: Update latest release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: db-latest
+          name: "Latest SWU DuckDB"
+          body: |
+            Auto-updated DuckDB with SWUStats meta data.
+            Updated by daily ingest workflow.
+          files: data/swu.duckdb
+          prerelease: true
+          token: ${{ secrets.GITHUB_TOKEN }}

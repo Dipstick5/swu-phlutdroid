@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "swu-phlutdroid": {
+      "command": "python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "/path/to/swu-meta-agent",
+      "env": {
+        "SWU_DB_PATH": "/path/to/swu-meta-agent/data/swu.duckdb"
+      }
+    }
+  }
+}
