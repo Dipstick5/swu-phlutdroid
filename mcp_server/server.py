@@ -591,7 +591,7 @@ def tournaments(
     try:
         t_rows = conn.execute(
             """
-            SELECT tournament_id, name, tournament_date, format, num_players, retrieved_at
+            SELECT tournament_id, name, tournament_date, melee_url, retrieved_at
             FROM silver.tournament
             ORDER BY tournament_date DESC
             LIMIT ?
@@ -602,7 +602,7 @@ def tournaments(
         if not t_rows:
             return {"results": [], "note": "No tournament data yet. Run update.py to ingest."}
 
-        t_cols = ["tournament_id", "name", "tournament_date", "format", "num_players", "retrieved_at"]
+        t_cols = ["tournament_id", "name", "tournament_date", "melee_url", "retrieved_at"]
         results = []
         for t in t_rows:
             t_dict = dict(zip(t_cols, t))
@@ -610,7 +610,8 @@ def tournaments(
             standing_rows = conn.execute(
                 """
                 SELECT ts.player_name, ts.standing, ts.leader_id, ts.base_id,
-                       ts.archetype_id, ts.wins, ts.losses,
+                       ts.archetype_id, ts.wins, ts.losses, ts.match_record,
+                       ts.leader_name_raw, ts.base_name_raw, ts.deck_url,
                        a.leader_name, a.base_name
                 FROM silver.tournament_standing ts
                 LEFT JOIN silver.archetype a USING (archetype_id)
@@ -621,7 +622,9 @@ def tournaments(
                 [tid],
             ).fetchall()
             s_cols = ["player_name", "standing", "leader_id", "base_id",
-                      "archetype_id", "wins", "losses", "leader_name", "base_name"]
+                      "archetype_id", "wins", "losses", "match_record",
+                      "leader_name_raw", "base_name_raw", "deck_url",
+                      "leader_name", "base_name"]
             t_dict["top_standings"] = [dict(zip(s_cols, r)) for r in standing_rows]
             results.append(t_dict)
 

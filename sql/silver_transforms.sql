@@ -198,36 +198,51 @@ WHERE r.payload IS NOT NULL;
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE TABLE silver.tournament AS
 SELECT
-    json_extract_string(j, '$.id')              AS tournament_id,
+    TRY_CAST(json_extract_string(j, '$.id') AS INTEGER) AS tournament_id,
     json_extract_string(j, '$.name')            AS name,
-    json_extract_string(j, '$.tournamentDate')  AS tournament_date,
-    json_extract_string(j, '$.format')          AS format,
-    TRY_CAST(json_extract_string(j, '$.numPlayers') AS INTEGER) AS num_players,
+    json_extract_string(j, '$.date')            AS tournament_date,
+    json_extract_string(j, '$.melee_url')       AS melee_url,
     r.retrieved_at
 FROM bronze.tournament_raw r,
      LATERAL (
-         SELECT unnest(
-             CASE WHEN json_type(json_extract(r.payload, '$.tournaments')) = 'ARRAY'
-                  THEN json_extract(r.payload, '$.tournaments[*]')
-                  ELSE json_extract(r.payload, '$[*]')
-             END
-         ) AS j
+         SELECT unnest(json_extract(r.payload, '$.tournaments[*]')) AS j
      )
-QUALIFY ROW_NUMBER() OVER (PARTITION BY json_extract_string(j, '$.id')
-                            ORDER BY r.retrieved_at DESC) = 1;
+QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY json_extract_string(j, '$.id')
+    ORDER BY r.retrieved_at DESC
+) = 1;
 
+-- Melee deck payload: leader/base are nested objects, deck URL via meleeId
 CREATE OR REPLACE TABLE silver.tournament_standing AS
 SELECT
     r.tournament_id,
-    json_extract_string(j, '$.playerName')     AS player_name,
-    TRY_CAST(json_extract_string(j, '$.standing') AS INTEGER) AS standing,
-    json_extract_string(j, '$.leaderID')       AS leader_id,
-    json_extract_string(j, '$.baseID')         AS base_id,
-    json_extract_string(j, '$.leaderID') || '/' ||
-        json_extract_string(j, '$.baseID')     AS archetype_id,
-    TRY_CAST(json_extract_string(j, '$.wins')  AS INTEGER) AS wins,
-    TRY_CAST(json_extract_string(j, '$.losses') AS INTEGER) AS losses,
+    json_extract_string(j, '$.player')                    AS player_name,
+    TRY_CAST(json_extract_string(j, '$.rank') AS INTEGER) AS standing,
+    json_extract_string(j, '$.leader.uuid')               AS leader_id,
+    -- base.groupUuid is the canonical SWU base ID; fall back to base.uuid
+    COALESCE(
+        json_extract_string(j, '$.base.groupUuid'),
+        json_extract_string(j, '$.base.uuid')
+    )                                                      AS base_id,
+    CASE
+        WHEN json_extract_string(j, '$.leader.uuid') IS NOT NULL
+         AND COALESCE(json_extract_string(j, '$.base.groupUuid'),
+                      json_extract_string(j, '$.base.uuid')) IS NOT NULL
+        THEN json_extract_string(j, '$.leader.uuid') || '/' ||
+             COALESCE(json_extract_string(j, '$.base.groupUuid'),
+                      json_extract_string(j, '$.base.uuid'))
+    END                                                    AS archetype_id,
+    json_extract_string(j, '$.leader.name')               AS leader_name_raw,
+    json_extract_string(j, '$.base.name')                 AS base_name_raw,
+    TRY_CAST(json_extract_string(j, '$.standings.match_wins')   AS INTEGER) AS wins,
+    TRY_CAST(json_extract_string(j, '$.standings.match_losses') AS INTEGER) AS losses,
+    json_extract_string(j, '$.standings.match_record')    AS match_record,
+    -- Deck URL: meleeId UUID maps to melee.gg/Decklist/View/{meleeId}
+    CASE WHEN json_extract_string(j, '$.meleeId') IS NOT NULL
+              AND json_extract_string(j, '$.meleeId') != 'null'
+         THEN 'https://melee.gg/Decklist/View/' || json_extract_string(j, '$.meleeId')
+    END                                                    AS deck_url,
     r.retrieved_at
 FROM bronze.tournament_deck_raw r,
-     LATERAL (SELECT unnest(json_extract(r.payload, '$[*]')) AS j)
-WHERE json_extract_string(j, '$.leaderID') IS NOT NULL;
+     LATERAL (SELECT unnest(json_extract(r.payload, '$.decks[*]')) AS j)
+WHERE json_extract_string(j, '$.leader.uuid') IS NOT NULL;
